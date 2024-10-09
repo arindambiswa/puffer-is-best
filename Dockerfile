@@ -1,99 +1,63 @@
-###
-# Builder container
-###
-FROM node:16-alpine AS node
-FROM golang:1.19-alpine AS builder
+# LTS version of Ubuntu supported by Pufferpanel
+FROM   ubuntu:18.04
 
-COPY --from=node /usr/lib /usr/lib
-COPY --from=node /usr/local/share /usr/local/share
-COPY --from=node /usr/local/lib /usr/local/lib
-COPY --from=node /usr/local/include /usr/local/include
-COPY --from=node /usr/local/bin /usr/local/bin
+# Author
+MAINTAINER jorisvos <jorisvos037@gmail.com>
 
-ARG tags=none
-ARG version=devel
-ARG sha=devel
-ARG goproxy
-ARG npmproxy
-ARG swagversion=1.8.8
+# Set environment variables
+ENV    DEBIAN_FRONTEND noninteractive
 
-ENV CGOENABLED=1
+ENV    VIRTUAL_HOST localhost
+ENV    VIRTUAL_PORT 8080
 
-ENV npm_config_registry=$npmproxy
-ENV GOPROXY=$goproxy
+ENV    ADMIN_NAME root
+ENV    ADMIN_PW pufferpanel
+ENV    ADMIN_EMAIL root@localhost
 
-RUN /bin/sh -c "go version && \
-    apk add --update --no-cache gcc musl-dev git curl make gcc g++ && \
-    mkdir /pufferpanel && \
-    wget https://github.com/swaggo/swag/releases/download/v${swagversion}/swag_${swagversion}_Linux_aarch64.tar.gz && \
-    mkdir -p ~/go/bin && \
-    tar -zxf swag*.tar.gz -C ~/go/bin && \
-    rm -rf swag*.tar.gz"
+# Download and install neccessarry software.
+RUN    apt-get --yes update
+RUN    apt-get --yes upgrade
+RUN    apt-get --yes install software-properties-common
 
-WORKDIR /build
+RUN    apt-add-repository universe
+RUN    apt-get --yes update
 
-COPY go.mod go.sum ./
-RUN /bin/sh -c "go mod download && go mod verify"
+RUN    apt-get --yes install expect ssh \ 
+       openssl curl nginx mysql-client mysql-server php-fpm php-cli php-curl php-mysql
 
-COPY . .
+# Download and unpack PufferPannel
+RUN    mkdir -p /srv && cd /srv && \
+       curl -L -o pufferpanel.tar.gz https://git.io/fNZYg && \
+       tar -xf pufferpanel.tar.gz && \
+       cd pufferpanel  && \
+       chmod +x pufferpanel
 
-RUN /bin/sh -c "~/go/bin/swag init -o web/swagger -g web/loader.go"
-RUN /bin/sh -c "go build -v -buildvcs=false -ldflags \"-X 'github.com/pufferpanel/pufferpanel/v2.Hash=$sha' -X 'github.com/pufferpanel/pufferpanel/v2.Version=$version'\" -o /pufferpanel/pufferpanel github.com/pufferpanel/pufferpanel/v2/cmd"
+# Add all needed scripts to container
+ADD    ./scripts/start /start
+ADD    ./scripts/install.exp /srv/install
+ADD    ./scripts/fixconfig /srv/fixconfig
+ADD    ./scripts/fixnginx /srv/fixnginx
 
-RUN /bin/sh -c "mv assets/email /pufferpanel/email && \
-    cd client && \
-    npm install && \
-    npm run build && \
-    mv dist /pufferpanel/www/"
+# Fix execution permissions for added scripts
+RUN    chmod +x /start
+RUN    chmod +x /srv/install
+RUN    chmod +x /srv/fixconfig
+RUN    chmod +x /srv/fixnginx
 
+# Configure Nginx (remove default config since we don't need this)
+RUN    rm /etc/nginx/sites-enabled/default
 
-###
-# Generate final image
-###
+# 5657 for SFTP
+EXPOSE 5657
 
-FROM alpine
-COPY --from=builder /pufferpanel /pufferpanel
+# 5656 for Daemon
+EXPOSE 5656
 
-EXPOSE 8080 5657
+# 8080 for WebServer
+EXPOSE 8080
 
-RUN /bin/sh -c "mkdir -p /etc/pufferpanel && \
-    mkdir -p /var/lib/pufferpanel"
+# 25565 is the standard port for a minecraft server
+EXPOSE 25565
 
-ENV PUFFER_LOGS=/etc/pufferpanel/logs \
-    PUFFER_PANEL_TOKEN_PUBLIC=/etc/pufferpanel/public.pem \
-    PUFFER_PANEL_TOKEN_PRIVATE=/etc/pufferpanel/private.pem \
-    PUFFER_PANEL_DATABASE_DIALECT=sqlite3 \
-    PUFFER_PANEL_DATABASE_URL="file:/etc/pufferpanel/pufferpanel.db?cache=shared" \
-    PUFFER_DAEMON_SFTP_KEY=/etc/pufferpanel/sftp.key \
-    PUFFER_DAEMON_DATA_CACHE=/var/lib/pufferpanel/cache \
-    PUFFER_DAEMON_DATA_SERVERS=/var/lib/pufferpanel/servers \
-    PUFFER_DAEMON_DATA_MODULES=/var/lib/pufferpanel/modules \
-    PUFFER_DAEMON_DATA_BINARIES=/var/lib/pufferpanel/binaries \
-    GIN_MODE=release
-
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
-
-RUN /bin/sh -c "echo 'https://dl-cdn.alpinelinux.org/alpine/edge/community' >> /etc/apk/repositories && \
-    apk update"
-
-RUN /bin/sh -c "apk add --no-cache openjdk17 && \
-    ln -sfn /usr/lib/jvm/java-17-openjdk/bin/java /usr/bin/java && \
-    ln -sfn /usr/lib/jvm/java-17-openjdk/bin/javac /usr/bin/javac && \
-    ln -sfn /usr/lib/jvm/java-17-openjdk/bin/java /usr/bin/java17 && \
-    ln -sfn /usr/lib/jvm/java-17-openjdk/bin/javac /usr/bin/javac17 && \
-    echo 'Testing Javac 17 path' && \
-    javac17 -version && \
-    echo 'Testing Java 17 path' && \
-    java17 -version && \
-    echo 'Testing java path' && \
-    java -version && \
-    echo 'Testing javac path' && \
-    javac -version"
-
-# Cleanup
-RUN /bin/sh -c "rm -rf /var/cache/apk/*"
-
-WORKDIR /pufferpanel
-
-ENTRYPOINT ["/pufferpanel/pufferpanel"]
-CMD ["run"]
+# /start is the start script
+CMD    ["/start"]
